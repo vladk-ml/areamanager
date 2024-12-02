@@ -1,0 +1,9 @@
+earthengine-api
+geemap
+streamlit
+streamlit-folium
+folium
+geojson
+pandas
+numpy
+setuptools>=65.5.1
