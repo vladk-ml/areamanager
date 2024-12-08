@@ -41,6 +41,11 @@ class AOIManager:
         if name in self.list_areas():
             raise ValueError(f"Area named '{name}' already exists")
         
+        # Ensure coordinates are in the correct format
+        if isinstance(coordinates[0][0], list):
+            # If coordinates are nested arrays (from drawing), flatten one level
+            coordinates = coordinates[0]
+        
         # Create new feature
         feature = {
             "type": "Feature",
@@ -52,10 +57,11 @@ class AOIManager:
             },
             "geometry": {
                 "type": "Polygon",
-                "coordinates": [coordinates]
+                "coordinates": [coordinates]  # Wrap in array for GeoJSON polygon format
             }
         }
         
+        # Add to features list
         data["features"].append(feature)
         self._save_geojson(data)
     
