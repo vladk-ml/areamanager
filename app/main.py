@@ -11,6 +11,9 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.insert(0, project_root)
 
 import streamlit as st
+from src.area_utils import AOIManager
+from src.sar_utils import SARManager
+from src.time_range_manager import TimeRangeManager
 
 st.set_page_config(
     page_title="Area Manager",
@@ -67,8 +70,6 @@ st.markdown("""
 import folium
 import ee
 from streamlit_folium import st_folium
-from src.area_utils import AOIManager
-from src.sar_utils import SARManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -126,10 +127,20 @@ def format_timestamp(timestamp_str):
 
 def main():
     # Initialize session state variables
-    if 'start_date' not in st.session_state:
-        st.session_state.start_date = datetime.now() - timedelta(days=30)
-    if 'end_date' not in st.session_state:
-        st.session_state.end_date = datetime.now()
+    if 'aoi_manager' not in st.session_state:
+        st.session_state.aoi_manager = AOIManager()
+    if 'sar_manager' not in st.session_state:
+        st.session_state.sar_manager = SARManager()
+    if 'time_range_manager' not in st.session_state:
+        st.session_state.time_range_manager = TimeRangeManager()
+    if 'show_aois' not in st.session_state:
+        st.session_state.show_aois = False
+    if 'current_query' not in st.session_state:
+        st.session_state.current_query = {
+            'aoi': None,
+            'start_date': None,
+            'end_date': None
+        }
     if 'map' not in st.session_state:
         st.session_state.map = folium.Map(
             location=[54.6872, 25.2797],
@@ -140,20 +151,8 @@ def main():
             prefer_canvas=True,
             control_scale=True
         )
-    if 'drawn_areas' not in st.session_state:
-        st.session_state.drawn_areas = {}
-    
-    st.title("🛰️ Area Manager")
-    
-    # Initialize managers
-    if 'aoi_manager' not in st.session_state:
-        st.session_state.aoi_manager = AOIManager()
-    if 'sar_manager' not in st.session_state:
-        st.session_state.sar_manager = SARManager()
-    
-    # Initialize map if not already done
     if 'draw' not in st.session_state:
-        draw = folium.plugins.Draw(
+        st.session_state.draw = folium.plugins.Draw(
             export=False,
             position='topleft',
             draw_options={
@@ -165,33 +164,47 @@ def main():
                 'circlemarker': False
             }
         )
-        st.session_state.map.add_child(draw)
-        st.session_state.draw = draw
+        st.session_state.map.add_child(st.session_state.draw)
+
+    st.title("🛰️ Area Manager")
+
+    # Create sidebar for controls instead of column
+    with st.sidebar:
+        st.subheader("Controls")
         
-        # Add existing areas to the map
-        areas = st.session_state.aoi_manager.list_areas()
-        if areas:
-            for area_name in areas:
-                area = st.session_state.aoi_manager.get_area(area_name)
-                if area:
-                    coords = area['geometry']['coordinates'][0]
-                    folium.Polygon(
-                        locations=[[p[1], p[0]] for p in coords],
-                        popup=area_name,
-                        color='red',
-                        fill=True,
-                        fillOpacity=0.2
-                    ).add_to(st.session_state.map)
-    
-    # Create two columns: controls and map
-    col1, col2 = st.columns([1, 3])
-    
-    # Control Panel Column
-    with col1:
+        # Basic Controls
+        with st.container():
+            st.subheader("Basic Controls")
+            if st.button('Reset Map', help='Reset the entire map to its initial state, clearing all drawings and layers'):
+                st.session_state.aoi_manager.clear_all()
+                st.session_state.sar_manager.clear()
+                st.session_state.show_aois = False
+                if 'map' in st.session_state:
+                    del st.session_state.map
+                if 'draw' in st.session_state:
+                    del st.session_state.draw
+                st.rerun()
+
+            if st.button('Clear SAR', help='Remove the SAR data overlay, keeping drawn areas intact'):
+                st.session_state.sar_manager.clear()
+                st.rerun()
+
+            # AOI Visibility Toggle
+            show_aois = st.checkbox('Show AOIs', value=st.session_state.show_aois)
+            if show_aois != st.session_state.show_aois:
+                st.session_state.show_aois = show_aois
+                if 'map' in st.session_state:
+                    del st.session_state.map
+                if 'draw' in st.session_state:
+                    del st.session_state.draw
+                st.rerun()
+
         # Area Management Section
         with st.container():
             st.subheader("Area Management")
-            new_area_name = st.text_input("Area Name", key="new_area_name", label_visibility="collapsed")
+            
+            # Area drawing and saving
+            new_area_name = st.text_input("Area Name", key="new_area_name")
             if st.button("Save Area", key="save_area"):
                 try:
                     if 'output' in st.session_state and st.session_state.output.get("all_drawings"):
@@ -205,189 +218,189 @@ def main():
                     else:
                         st.warning("Please draw an area on the map first")
                 except Exception as e:
-                    logger.error("Error saving area", exc_info=True)
                     st.error(f"Error saving area: {str(e)}")
-        
-        # Area Selection Section
-        with st.container():
-            st.subheader("Area Selection")
+            
+            # Area selection
             areas = st.session_state.aoi_manager.list_areas()
             if areas:
-                area_info = []
-                for area_name in areas:
-                    area_data = st.session_state.aoi_manager.get_area(area_name)
-                    if area_data:
-                        coords = area_data['geometry']['coordinates'][0]
-                        size = calculate_area_size(coords)
-                        timestamp = area_data.get('timestamp', '2024-01-01T00:00:00')
-                        area_info.append({
-                            'name': area_name,
-                            'size': size,
-                            'timestamp': timestamp,
-                            'display': f"{area_name} ({size:.0f} km²)"
-                        })
-                
-                selected_area = st.selectbox(
-                    "Select Area",
-                    options=[area['name'] for area in area_info],
-                    format_func=lambda x: next((area['display'] for area in area_info if area['name'] == x), x),
-                    label_visibility="collapsed",
-                    key="selected_area"
-                )
-                
-                if st.button("Delete Area", key="delete_area"):
-                    if selected_area:
+                selected_area = st.selectbox("Select Area", areas)
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Delete Area", key="delete_area"):
                         st.session_state.aoi_manager.delete_area(selected_area)
                         st.rerun()
-        
-        # Date Range Section
+                with col2:
+                    if st.button("Load to Query", key="load_aoi"):
+                        st.session_state.current_query['aoi'] = selected_area
+                        st.rerun()
+
+        # Time Range Management Section
         with st.container():
-            st.subheader("Date Range")
-            start_date = st.date_input("Start Date", value=st.session_state.start_date, key="start_date_input")
-            if start_date != st.session_state.start_date:
-                st.session_state.start_date = start_date
-                st.rerun()
+            st.subheader("Time Range Management")
             
-            end_date = st.date_input("End Date", value=st.session_state.end_date, key="end_date_input")
-            if end_date != st.session_state.end_date:
-                st.session_state.end_date = end_date
-                st.rerun()
+            # Quick date options
+            st.markdown("**Quick Date Selection:**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("Last 7 days"):
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=7)
+                    st.session_state.current_query['start_date'] = start_date.strftime('%Y-%m-%d')
+                    st.session_state.current_query['end_date'] = end_date.strftime('%Y-%m-%d')
+                    st.rerun()
+            with col2:
+                if st.button("Last 14 days"):
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=14)
+                    st.session_state.current_query['start_date'] = start_date.strftime('%Y-%m-%d')
+                    st.session_state.current_query['end_date'] = end_date.strftime('%Y-%m-%d')
+                    st.rerun()
+            with col3:
+                if st.button("Last 30 days"):
+                    end_date = datetime.now()
+                    start_date = end_date - timedelta(days=30)
+                    st.session_state.current_query['start_date'] = start_date.strftime('%Y-%m-%d')
+                    st.session_state.current_query['end_date'] = end_date.strftime('%Y-%m-%d')
+                    st.rerun()
             
-            cols = st.columns(3)
-            with cols[0]:
-                if st.button("7d"):
-                    st.session_state.start_date = datetime.now() - timedelta(days=7)
-                    st.session_state.end_date = datetime.now()
-                    st.rerun()
-            with cols[1]:
-                if st.button("14d"):
-                    st.session_state.start_date = datetime.now() - timedelta(days=14)
-                    st.session_state.end_date = datetime.now()
-                    st.rerun()
-            with cols[2]:
-                if st.button("30d"):
-                    st.session_state.start_date = datetime.now() - timedelta(days=30)
-                    st.session_state.end_date = datetime.now()
-                    st.rerun()
-        
-        # Map Controls Section
+            st.markdown("**Custom Date Range:**")
+            # Date input
+            start_date = st.date_input("Start Date", 
+                value=datetime.strptime(st.session_state.current_query['start_date'], '%Y-%m-%d') if st.session_state.current_query['start_date'] else None)
+            end_date = st.date_input("End Date", 
+                value=datetime.strptime(st.session_state.current_query['end_date'], '%Y-%m-%d') if st.session_state.current_query['end_date'] else None)
+            
+            # Save time range
+            col1, col2 = st.columns(2)
+            with col1:
+                time_range_name = st.text_input("Time Range Name")
+            with col2:
+                if st.button("Save Range") and time_range_name and start_date and end_date:
+                    if st.session_state.time_range_manager.save_timerange(
+                        time_range_name,
+                        start_date.strftime("%Y-%m-%d"),
+                        end_date.strftime("%Y-%m-%d")
+                    ):
+                        st.success(f"Saved time range: {time_range_name}")
+                        st.rerun()
+            
+            # Load saved time ranges
+            saved_ranges = st.session_state.time_range_manager.list_timeranges()
+            if saved_ranges:
+                st.markdown("**Saved Ranges:**")
+                selected_range = st.selectbox("Select Range", saved_ranges)
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Delete Range", key="delete_range"):
+                        st.session_state.time_range_manager.delete_timerange(selected_range)
+                        st.rerun()
+                with col2:
+                    if st.button("Load to Query", key="load_timerange"):
+                        timerange = st.session_state.time_range_manager.get_timerange(selected_range)
+                        if timerange:
+                            st.session_state.current_query['start_date'] = timerange['start_date']
+                            st.session_state.current_query['end_date'] = timerange['end_date']
+                            st.rerun()
+
+        # Query Section
         with st.container():
-            st.subheader("Map Controls")
-            if st.button("Reset Map"):
-                st.session_state.map = folium.Map(
-                    location=[54.6872, 25.2797],
-                    zoom_start=6,
-                    tiles='CartoDB positron',
-                    width="100%",
-                    height="100%",
-                    prefer_canvas=True,
-                    control_scale=True
-                )
-                st.session_state.map.add_child(st.session_state.draw)
-                st.rerun()
+            st.subheader("Query Builder")
             
-            if st.button("Clear SAR"):
-                if hasattr(st.session_state, 'sar_layer'):
-                    st.session_state.sar_layer = None
-                    st.rerun()
-        
-        # SAR Controls Section
-        with st.container():
-            st.subheader("SAR Controls")
+            # Show current query parameters
+            st.markdown("**Current Query Parameters:**")
+            aoi_status = st.session_state.current_query['aoi'] or "Not selected"
+            st.markdown(f"- **Area of Interest:** {aoi_status}")
             
-            preview_button = st.button("Preview Query")
-            if preview_button:
-                if selected_area:
-                    area_coords = st.session_state.aoi_manager.get_area(selected_area)
-                    if area_coords:
-                        start_date = st.session_state.start_date
-                        end_date = st.session_state.end_date
-                        geometry = ee.Geometry(area_coords['geometry'])
-                        
+            date_status = "Not selected"
+            if st.session_state.current_query['start_date'] and st.session_state.current_query['end_date']:
+                date_status = f"{st.session_state.current_query['start_date']} to {st.session_state.current_query['end_date']}"
+            st.markdown(f"- **Time Range:** {date_status}")
+            
+            # Preview and Execute buttons
+            if st.session_state.current_query['aoi'] and st.session_state.current_query['start_date']:
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Preview Query"):
+                        area = st.session_state.aoi_manager.get_area(st.session_state.current_query['aoi'])
                         preview = st.session_state.sar_manager.preview_query(
-                            geometry, 
-                            start_date.strftime('%Y-%m-%d'), 
-                            end_date.strftime('%Y-%m-%d')
+                            area['geometry'],
+                            st.session_state.current_query['start_date'],
+                            st.session_state.current_query['end_date']
                         )
-                        
-                        st.session_state.query_preview = preview
-                        st.session_state.query_geometry = geometry
-                        st.rerun()
-                    else:
-                        st.error("Could not load area coordinates")
-                else:
-                    st.error("Please select an area first")
-            
-            execute_button = st.button("Execute Query", disabled='query_preview' not in st.session_state)
-            if execute_button and 'query_preview' in st.session_state:
-                if st.session_state.query_preview['results_preview']['image_count'] > 0:
-                    geometry = st.session_state.query_geometry
-                    start_date = st.session_state.start_date
-                    end_date = st.session_state.end_date
-                    
-                    sar_data = st.session_state.sar_manager.process_area(
-                        geometry,
-                        start_date.strftime('%Y-%m-%d'),
-                        end_date.strftime('%Y-%m-%d')
-                    )
-                    if sar_data:
-                        vis_params = {
-                            'min': 0,
-                            'max': 255,
-                            'palette': ['black', 'white']
-                        }
-                        map_id_dict = sar_data.composite.getMapId(vis_params)
-                        st.session_state.sar_layer = folium.TileLayer(
-                            tiles=map_id_dict['tile_fetcher'].url_format,
-                            attr='Google Earth Engine',
-                            overlay=True,
-                            name='SAR Data',
-                            opacity=0.7
+                        st.write(preview)
+                
+                with col2:
+                    if st.button("Execute Query"):
+                        area = st.session_state.aoi_manager.get_area(st.session_state.current_query['aoi'])
+                        sar_data = st.session_state.sar_manager.process_area(
+                            area['geometry'],
+                            st.session_state.current_query['start_date'],
+                            st.session_state.current_query['end_date']
                         )
-                        st.session_state.map.add_child(st.session_state.sar_layer)
-                        st.session_state.current_sar_data = sar_data
-                        st.rerun()
-                else:
-                    st.warning("No images found for the selected parameters")
-            
-            export_button = st.button("Export to Drive", disabled='current_sar_data' not in st.session_state)
-            if export_button and 'current_sar_data' in st.session_state:
-                try:
-                    task = ee.batch.Export.image.toDrive(
-                        image=st.session_state.current_sar_data.composite,
-                        description=f'SAR_Export_{selected_area}_{datetime.now().strftime("%Y%m%d")}',
-                        folder='AreaManager_Exports',
-                        scale=10,
-                        maxPixels=1e9,
-                        region=st.session_state.query_geometry.bounds().getInfo()['coordinates']
-                    )
-                    task.start()
-                    st.success("✅ Export started! Check your Google Drive folder 'AreaManager_Exports'")
-                except Exception as e:
-                    st.error(f"Export failed: {str(e)}")
-            
-            # Show preview information if available
-            if 'query_preview' in st.session_state:
-                preview = st.session_state.query_preview
-                st.markdown("### Query Info")
-                st.json({
-                    "Area": f"{preview['area_info']['size_km2']} km²",
-                    "Date Range": f"{preview['date_range']['start']} to {preview['date_range']['end']}",
-                    "Images Found": preview['results_preview']['image_count'],
-                    "Estimated Size": f"{preview['results_preview']['estimated_size_mb']} MB",
-                    "Parameters": preview['query_params']
-                })
+                        if sar_data:
+                            vis_params = {
+                                'bands': ['VH_ascending', 'VH_descending', 'VV_combined'],
+                                'min': [-25, -20, -25],
+                                'max': [0, 10, 0],
+                                'gamma': 1.0,
+                                'opacity': 1.0
+                            }
+                            map_id_dict = sar_data.composite.getMapId(vis_params)
+                            st.session_state.sar_layer = folium.TileLayer(
+                                tiles=map_id_dict['tile_fetcher'].url_format,
+                                attr='Google Earth Engine',
+                                overlay=True,
+                                name='SAR Data',
+                                opacity=1.0
+                            )
+                            st.session_state.map.add_child(st.session_state.sar_layer)
+                            st.session_state.current_sar_data = sar_data
+                            st.rerun()
+
+    # Main content area for map
+    st.markdown("""
+        <style>
+        .stMapContainer {
+            height: 800px;
+            width: 100%;
+        }
+        </style>
+    """, unsafe_allow_html=True)
     
-    # Map Column
-    with col2:
-        output = st_folium(
-            st.session_state.map,
+    # Initialize map
+    if 'map' not in st.session_state:
+        st.session_state.map = folium.Map(
+            location=[54.6872, 25.2797],
+            zoom_start=6,
+            tiles='CartoDB positron',
             width="100%",
-            height=800,
-            returned_objects=["all_drawings"]
+            height="100%",
+            prefer_canvas=True,
+            control_scale=True
         )
-        if output:
-            st.session_state.output = output
+    if 'draw' not in st.session_state:
+        st.session_state.draw = folium.plugins.Draw(
+            export=False,
+            position='topleft',
+            draw_options={
+                'polyline': False,
+                'rectangle': True,
+                'polygon': True,
+                'circle': False,
+                'marker': False,
+                'circlemarker': False
+            }
+        )
+        st.session_state.map.add_child(st.session_state.draw)
+
+    output = st_folium(
+        st.session_state.map,
+        width="100%",
+        height=800,
+        returned_objects=["all_drawings"]
+    )
+    if output:
+        st.session_state.output = output
 
 if __name__ == "__main__":
     if initialize_ee():

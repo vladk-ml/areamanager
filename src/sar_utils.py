@@ -3,7 +3,7 @@ import folium
 from datetime import datetime, timedelta
 import logging
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -19,20 +19,33 @@ class SARManager:
     def __init__(self):
         self.collection = 'COPERNICUS/S1_GRD'
     
-    def process_area(self, geometry: ee.Geometry, start_date: str, end_date: str) -> Optional[SARData]:
+    def _validate_dates(self, start_date: str, end_date: str) -> Tuple[ee.Date, ee.Date]:
+        """Validate and convert date strings to ee.Date objects"""
+        try:
+            ee_start_date = ee.Date(start_date)
+            ee_end_date = ee.Date(end_date)
+            
+            # Ensure end date is after start date
+            if ee_end_date.difference(ee_start_date, 'day').getInfo() <= 0:
+                raise ValueError("End date must be after start date")
+                
+            return ee_start_date, ee_end_date
+        except Exception as e:
+            raise ValueError(f"Invalid date format. Dates should be in YYYY-MM-DD format. Error: {str(e)}")
+
+    def process_area(self, geometry: Dict[str, Any], start_date: str, end_date: str) -> Optional[SARData]:
         """Process an area to get SAR data. Returns None if no data available."""
         try:
-            # Validate geometry
-            if not isinstance(geometry, ee.Geometry):
-                raise ValueError("Invalid geometry type. Expected ee.Geometry")
+            # Convert geometry to Earth Engine format
+            ee_geometry = ee.Geometry(geometry)
             
-            # Get the collection
-            collection = (ee.ImageCollection(self.collection)
-                .filterBounds(geometry)
-                .filterDate(start_date, end_date)
-                .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
-                .filter(ee.Filter.eq('instrumentMode', 'IW'))
-                .filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING')))
+            # Validate dates
+            ee_start_date, ee_end_date = self._validate_dates(start_date, end_date)
+            
+            # Get Sentinel-1 collection
+            collection = ee.ImageCollection(self.collection) \
+                .filterDate(ee_start_date, ee_end_date) \
+                .filterBounds(ee_geometry)
             
             # Check collection size
             size = collection.size().getInfo()
@@ -44,7 +57,7 @@ class SARManager:
             composite = self._create_composite(collection)
             
             # Get bounds for export
-            bounds = geometry.bounds().getInfo()
+            bounds = ee_geometry.bounds().getInfo()
             
             return SARData(
                 composite=composite,
@@ -58,13 +71,35 @@ class SARManager:
             raise
     
     def _create_composite(self, collection: ee.ImageCollection) -> ee.Image:
-        """Create a composite image from the collection"""
-        return collection.map(lambda img: img.select('VV')
-                        .clip(img.geometry())
-                        .focal_median(50, 'circle', 'meters')
-                        .unitScale(-30, 5)
-                        .multiply(255)
-                        ).mean()
+        """Create a composite image optimized for interference pattern detection"""
+        # Filter to get images with VV and VH dual polarization
+        filtered = collection.filter(
+            ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')
+        ).filter(
+            ee.Filter.listContains('transmitterReceiverPolarisation', 'VH')
+        ).filter(
+            ee.Filter.eq('instrumentMode', 'IW')  # Interferometric Wide Swath mode
+        )
+        
+        # Separate ascending and descending passes
+        ascending = filtered.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'))
+        descending = filtered.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'))
+        
+        # Create composite using the three bands as in JavaScript
+        vh_ascending = ascending.select('VH').max()
+        vh_descending = descending.select('VH').max()
+        vv_combined = ee.ImageCollection(
+            ascending.select('VV').merge(descending.select('VV'))
+        ).max()
+        
+        # Combine all three bands and apply median filter
+        composite = ee.Image.cat([
+            vh_ascending.rename('VH_ascending'),
+            vh_descending.rename('VH_descending'),
+            vv_combined.rename('VV_combined')
+        ]).focal_median()
+        
+        return composite
     
     def add_to_map(self, m: folium.Map, sar_data: SARData) -> None:
         """Add SAR data to the map"""
@@ -137,39 +172,31 @@ class SARManager:
         )
         return stats.getInfo()
     
-    def preview_query(self, geometry: ee.Geometry, start_date: str, end_date: str) -> Dict[str, Any]:
-        """Preview the query without processing data"""
+    def preview_query(self, geometry: Dict[str, Any], start_date: str, end_date: str) -> Dict[str, Any]:
+        """Preview the query parameters and expected results"""
         try:
-            # Get the collection
-            collection = (ee.ImageCollection(self.collection)
-                .filterBounds(geometry)
-                .filterDate(start_date, end_date)
-                .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
-                .filter(ee.Filter.eq('instrumentMode', 'IW'))
-                .filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING')))
+            # Convert geometry to Earth Engine format
+            ee_geometry = ee.Geometry(geometry)
             
-            # Get collection size
+            # Validate dates
+            ee_start_date, ee_end_date = self._validate_dates(start_date, end_date)
+            
+            # Get Sentinel-1 collection
+            collection = ee.ImageCollection(self.collection) \
+                .filterDate(ee_start_date, ee_end_date) \
+                .filterBounds(ee_geometry)
+            
             size = collection.size().getInfo()
             
-            # Calculate area size
-            area_size = geometry.area().divide(1e6).getInfo()  # Convert to km²
+            # Calculate area size in km²
+            area_size = ee_geometry.area().divide(1e6).getInfo()  # Convert to km²
             
-            # Get bounds
-            bounds = geometry.bounds().getInfo()
-            
-            # Estimate data size (rough estimate: 2MB per image)
-            estimated_size = size * 2  # MB
+            # Estimate data size (rough estimate)
+            estimated_size_mb = size * 0.5  # Rough estimate of MB per image
             
             return {
-                'query_params': {
-                    'collection': self.collection,
-                    'polarization': 'VV',
-                    'instrument_mode': 'IW',
-                    'orbit': 'DESCENDING'
-                },
                 'area_info': {
-                    'size_km2': round(area_size, 2),
-                    'bounds': bounds
+                    'size_km2': area_size
                 },
                 'date_range': {
                     'start': start_date,
@@ -177,10 +204,37 @@ class SARManager:
                 },
                 'results_preview': {
                     'image_count': size,
-                    'estimated_size_mb': estimated_size
+                    'estimated_size_mb': estimated_size_mb
+                },
+                'query_params': {
+                    'collection': self.collection,
+                    'polarisation': 'VH',
+                    'mode': 'IW',
+                    'orbit': 'DESCENDING'
                 }
             }
             
+        except ValueError as e:
+            return {
+                'error': str(e),
+                'area_info': {
+                    'size_km2': 0
+                },
+                'date_range': {
+                    'start': start_date,
+                    'end': end_date
+                },
+                'results_preview': {
+                    'image_count': 0,
+                    'estimated_size_mb': 0
+                },
+                'query_params': {
+                    'collection': self.collection,
+                    'polarisation': 'VH',
+                    'mode': 'IW',
+                    'orbit': 'DESCENDING'
+                }
+            }
         except Exception as e:
             logger.error(f"Error previewing query: {str(e)}", exc_info=True)
             raise
