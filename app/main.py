@@ -5,6 +5,12 @@ import logging
 from pathlib import Path
 from datetime import datetime
 from datetime import timedelta
+from typing import TYPE_CHECKING
+import folium
+import folium.plugins
+
+if TYPE_CHECKING:
+    from folium.plugins import Draw
 
 # Add project root to Python path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -67,7 +73,6 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-import folium
 import ee
 from streamlit_folium import st_folium
 
@@ -152,7 +157,7 @@ def main():
             control_scale=True
         )
     if 'draw' not in st.session_state:
-        st.session_state.draw = folium.plugins.Draw(
+        st.session_state.draw = folium.plugins.Draw(  # type: ignore[attr-defined]
             export=False,
             position='topleft',
             draw_options={
@@ -379,7 +384,7 @@ def main():
             control_scale=True
         )
     if 'draw' not in st.session_state:
-        st.session_state.draw = folium.plugins.Draw(
+        st.session_state.draw = folium.plugins.Draw(  # type: ignore[attr-defined]
             export=False,
             position='topleft',
             draw_options={

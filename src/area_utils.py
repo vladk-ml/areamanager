@@ -143,3 +143,7 @@ class AOIManager:
             filename='areas_export'
         )
         return url
+    
+    def clear_all(self):
+        """Clear all areas by resetting the GeoJSON file to an empty state"""
+        self._save_geojson({"type": "FeatureCollection", "features": []})
